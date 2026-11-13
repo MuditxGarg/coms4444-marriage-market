@@ -1596,7 +1596,25 @@ class Player3HybridB(TournamentTweak, _Player3PreTournament):
 
 
 class Player3(PanicMarry, Player3Shipped):
-	"""Submitted player: main strategy plus shortlist tie-break. Panic-marry stays off."""
+	"""Submitted player: main strategy plus shortlist tie-break. Panic-marry stays off.
+
+	Say yes when a partner has already proposed and the match is still strictly
+	positive. The quality bar was vetoing those, which left happy marriages
+	unmade and did not raise the value of the marriages we kept.
+	"""
 
 	SHORTLIST_TIES = True
 	PANIC_MARRY = False
+
+	def decide(self, date, observed, stated_ideal):
+		decision = super().decide(date, observed, stated_ideal)
+		if decision.incompatible:
+			return decision
+		estimate = self._est.get(date.partner, 0.0)
+		if (
+			estimate > 0
+			and date.partner in self._proposed_to_me
+			and date.date_number >= self.MIN_DATES
+		):
+			return Decision(again=True, propose=True)
+		return decision
