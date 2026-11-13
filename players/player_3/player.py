@@ -1462,6 +1462,159 @@ class Player3(CalibrationPolicy, _CalibrationBase):
 	pass
 
 
-class Player3(Player3):
+_Player3PreTournament = Player3
+
+
+class PanicMarry:
+	"""Late-round proposals. Off unless ``PANIC_MARRY`` is set on the subclass."""
+
+	PANIC_MARRY = False
+	PANIC_ROUNDS_LEFT = 2
+	PANIC_SINGLES_MAX = 6
+	PANIC_FLOOR_FRAC = -0.25
+	LOW_BONUS = 75
+
+	def _panic_params(self, date):
+		if self.bonus <= 10:
+			return max(4, self.rounds // 2), self.people, -0.75
+		if self.bonus <= self.LOW_BONUS:
+			return max(5, self.rounds // 5), 12, -0.5
+		return self.PANIC_ROUNDS_LEFT, self.PANIC_SINGLES_MAX, self.PANIC_FLOOR_FRAC
+
+	def decide(self, date, observed, stated_ideal):
+		decision = super().decide(date, observed, stated_ideal)
+		if not self.PANIC_MARRY or decision.incompatible:
+			return decision
+		rounds_left, singles_max, floor_frac = self._panic_params(date)
+		if date.rounds_left > rounds_left or self._last_singles > singles_max:
+			return decision
+		floor = floor_frac * self.bonus
+		raw = self._estimate(observed, stated_ideal)
+		est = min(raw, self._est.get(date.partner, raw))
+		if date.date_number >= self.MIN_DATES and est > floor:
+			return Decision(again=True, propose=True)
+		if decision.propose:
+			return Decision(again=True, propose=True)
+		return decision
+
+
+class TournamentTweak(PanicMarry):
+	"""Plan D panic marry + Plan E tournament parameter tuning."""
+
+	# Plan E
+	SETTINGS = {
+		**DECEPTION_DEFAULTS,
+		'guard': 'none',
+		'ad_inflate': 0,
+		'preference_blend': 0.0,
+		'adaptive': 'none',
+		'stable_ideal': True,
+	}
+	QUALITY_STRENGTH = 0.45
+	FILTER_REJECTED = True
+	R2_DISPERSION = False
+	R2_ENDGAME = True
+
+	PANIC_MARRY = True
+
+	def _quality_bar(self, date):
+		if self.bonus <= 10:
+			return 0.0
+		if self.bonus <= self.LOW_BONUS or date.rounds_left <= 10:
+			return 0.0
+		return super()._quality_bar(date)
+
+	def choose_dates(self, candidates, turn):
+		if self.bonus < 100 and turn.rounds_left <= 15:
+			saved = self.FILTER_REJECTED
+			self.FILTER_REJECTED = False
+			try:
+				return super().choose_dates(candidates, turn)
+			finally:
+				self.FILTER_REJECTED = saved
+		return super().choose_dates(candidates, turn)
+
+
+class Player3TournamentBundle(TournamentTweak, _Player3PreTournament):
+	"""Honesty and quality tweaks plus panic-marry. Not the submitted player."""
+
+
+class Player3PreTournament(_Player3PreTournament):
+	"""Pre-tournament-tweak player for A/B evaluation only."""
+
+
+class Player3Shipped(Player3PreTournament):
+	"""Player as it stood on main: dispersion and endgame, no panic-marry layer."""
+
 	R2_DISPERSION = True
 	R2_ENDGAME = True
+
+
+class Player3HybridA(TournamentTweak, _Player3PreTournament):
+	"""Keep original deception and quality; add panic and a low-bonus bar only."""
+
+	SETTINGS = {
+		**DECEPTION_DEFAULTS,
+		'ad_inflate': 2,
+		'preference_blend': 0.65,
+		'adaptive': 'late',
+		'late_fraction': 0.35,
+		'stable_ideal': False,
+		'guard': 'raw',
+	}
+	QUALITY_STRENGTH = 1.0
+	R2_DISPERSION = True
+
+	def _quality_bar(self, date):
+		if self.bonus <= self.LOW_BONUS:
+			return 0.0
+		return super(TournamentTweak, self)._quality_bar(date)
+
+	def choose_dates(self, candidates, turn):
+		return super(TournamentTweak, self).choose_dates(candidates, turn)
+
+
+class Player3HybridB(TournamentTweak, _Player3PreTournament):
+	"""Stay honest. Full quality and dispersion only when B is large; panic only when B is small."""
+
+	QUALITY_STRENGTH = 1.0
+	PANIC_HIGH_BONUS = False
+
+	@property
+	def R2_DISPERSION(self):  # noqa: N802 - matches the class-flag name used by CoveragePolicy
+		return self.bonus >= 100
+
+	def _quality_bar(self, date):
+		if self.bonus <= self.LOW_BONUS:
+			return 0.0
+		return super(TournamentTweak, self)._quality_bar(date)
+
+	def decide(self, date, observed, stated_ideal):
+		if self.bonus > self.LOW_BONUS:
+			return super(TournamentTweak, self).decide(date, observed, stated_ideal)
+		return PanicMarry.decide(self, date, observed, stated_ideal)
+
+
+class Player3(PanicMarry, Player3Shipped):
+	"""Submitted player: main strategy plus shortlist tie-break. Panic-marry stays off.
+
+	Say yes when a partner has already proposed and the match is still strictly
+	positive. The quality bar was vetoing those, which left happy marriages
+	unmade and did not raise the value of the marriages we kept.
+	"""
+
+	SHORTLIST_TIES = True
+	PANIC_MARRY = False
+
+	def decide(self, date, observed, stated_ideal):
+		decision = super().decide(date, observed, stated_ideal)
+		if decision.incompatible:
+			return decision
+		estimate = self._est.get(date.partner, 0.0)
+		if (
+			estimate > 0
+			and date.partner in self._proposed_to_me
+			and date.date_number >= self.MIN_DATES
+		):
+			return Decision(again=True, propose=True)
+		return decision
